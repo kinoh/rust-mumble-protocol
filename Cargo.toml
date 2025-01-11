@@ -1,6 +1,6 @@
 [package]
 name = "mumble-protocol-2x"
-version = "0.5.0"
+version = "0.6.0"
 authors = [
   "Marco Rebhan <me@dblsaiko.net>",
   "Jonas Herzig <me@johni0702.de>"
