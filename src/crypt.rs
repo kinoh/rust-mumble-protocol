@@ -2,9 +2,13 @@
 
 use std::io;
 
+use aes::cipher::generic_array::GenericArray;
+use aes::cipher::BlockDecrypt;
+use aes::cipher::BlockEncrypt;
+use aes::cipher::KeyInit;
+use aes::Aes128;
 use bytes::BytesMut;
-use openssl::memcmp;
-use openssl::rand::rand_bytes;
+use rand::TryRngCore;
 
 use crate::voice::Clientbound;
 use crate::voice::Serverbound;
@@ -68,7 +72,8 @@ impl<EncodeDst: VoicePacketDst, DecodeDst: VoicePacketDst> CryptState<EncodeDst,
     /// Creates a new CryptState with randomly generated key and initial encrypt- and decrypt-nonce.
     pub fn generate_new() -> Self {
         let mut key = [0; KEY_SIZE];
-        rand_bytes(&mut key).unwrap();
+        let mut rng = rand::rngs::OsRng::default();
+        rng.try_fill_bytes(&mut key).unwrap();
 
         CryptState {
             codec: VoiceCodec::new(),
@@ -206,7 +211,7 @@ impl<EncodeDst: VoicePacketDst, DecodeDst: VoicePacketDst> CryptState<EncodeDst,
         }
 
         let tag = self.ocb_decrypt(buf.as_mut());
-        if !memcmp::eq(&tag.to_be_bytes()[0..3], &header[1..4]) {
+        if !secure_memeq(&tag.to_be_bytes()[0..3], &header[1..4]) {
             self.decrypt_nonce = saved_nonce;
             return Err(DecryptError::Mac);
         }
@@ -305,36 +310,19 @@ impl<EncodeDst: VoicePacketDst, DecodeDst: VoicePacketDst> CryptState<EncodeDst,
     }
 
     /// AES-128 encryption primitive.
-    fn aes_encrypt(&self, block: u128) -> u128 {
-        // TODO is there no better way to do this (and aes_decrypt)?
-        let mut result = [0u8; BLOCK_SIZE * 2];
-        let mut crypter = openssl::symm::Crypter::new(
-            openssl::symm::Cipher::aes_128_ecb(),
-            openssl::symm::Mode::Encrypt,
-            &self.key,
-            None,
-        )
-        .unwrap();
-        crypter.pad(false);
-        crypter.update(&block.to_be_bytes(), &mut result).unwrap();
-        crypter.finalize(&mut result).unwrap();
-        u128::from_be_bytes((&result[..BLOCK_SIZE]).try_into().unwrap())
+    pub fn aes_encrypt(&self, block: u128) -> u128 {
+        let mut block_bytes = block.to_be_bytes();
+        let cipher = Aes128::new_from_slice(&self.key).unwrap();
+        cipher.encrypt_block(GenericArray::from_mut_slice(&mut block_bytes));
+        u128::from_be_bytes(block_bytes)
     }
 
     /// AES-128 decryption primitive.
     fn aes_decrypt(&self, block: u128) -> u128 {
-        let mut result = [0u8; BLOCK_SIZE * 2];
-        let mut crypter = openssl::symm::Crypter::new(
-            openssl::symm::Cipher::aes_128_ecb(),
-            openssl::symm::Mode::Decrypt,
-            &self.key,
-            None,
-        )
-        .unwrap();
-        crypter.pad(false);
-        crypter.update(&block.to_be_bytes(), &mut result).unwrap();
-        crypter.finalize(&mut result).unwrap();
-        u128::from_be_bytes((&result[..BLOCK_SIZE]).try_into().unwrap())
+        let cipher = Aes128::new_from_slice(&self.key).unwrap();
+        let mut block_bytes = block.to_be_bytes();
+        cipher.decrypt_block(GenericArray::from_mut_slice(&mut block_bytes));
+        u128::from_be_bytes(block_bytes)
     }
 }
 
@@ -342,6 +330,11 @@ fn s2(block: u128) -> u128 {
     let rot = block.rotate_left(1);
     let carry = rot & 1;
     rot ^ (carry * 0x86)
+}
+
+fn secure_memeq(a: &[u8], b: &[u8]) -> bool {
+    assert_eq!(a.len(), b.len());
+    unsafe { memsec::memeq(&a[0], &b[0], a.len()) }
 }
 
 impl<EncodeDst: VoicePacketDst, DecodeDst: VoicePacketDst> CryptState<EncodeDst, DecodeDst> {
