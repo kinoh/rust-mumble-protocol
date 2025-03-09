@@ -13,14 +13,83 @@ use mumble_protocol_2x::control::ControlPacket;
 use mumble_protocol_2x::crypt::ClientCryptState;
 use mumble_protocol_2x::voice::VoicePacket;
 use mumble_protocol_2x::voice::VoicePacketPayload;
+use tokio_rustls::rustls::RootCertStore;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
-use tokio_native_tls::TlsConnector;
 use tokio_util::codec::Decoder;
 use tokio_util::udp::UdpFramed;
+use tokio_rustls::rustls::client::danger::HandshakeSignatureValid;
+use tokio_rustls::rustls::client::danger::ServerCertVerified;
+use tokio_rustls::rustls::client::danger::ServerCertVerifier;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::ClientConfig;
+use tokio_rustls::rustls::SignatureScheme;
+use tokio_rustls::TlsConnector;
+use webpki_roots::TLS_SERVER_ROOTS;
+
+#[derive(Debug)]
+struct NoCertificateVerification;
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+
+    fn verify_server_cert(
+        &self,
+        _: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> Option<&[tokio_rustls::rustls::DistinguishedName]> {
+        None
+    }
+}
 
 async fn connect(
     server_addr: SocketAddr,
@@ -34,18 +103,26 @@ async fn connect(
     let mut crypt_state_sender = Some(crypt_state_sender);
 
     // Connect to server via TCP
-    let stream = TcpStream::connect(&server_addr).await.expect("Failed to connect to server:");
+    let stream = TcpStream::connect(&server_addr)
+        .await
+        .expect("Failed to connect to server:");
     println!("TCP connected..");
 
     // Wrap the connection in TLS
-    let mut builder = native_tls::TlsConnector::builder();
-    builder.danger_accept_invalid_certs(accept_invalid_cert);
-    let connector: TlsConnector = builder
-        .build()
-        .expect("Failed to create TLS connector")
-        .into();
+    let config = if accept_invalid_cert {
+        ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+            .with_no_client_auth()
+    } else {
+        ClientConfig::builder()
+            .with_root_certificates(RootCertStore::from_iter(TLS_SERVER_ROOTS.iter().cloned()))
+            .with_no_client_auth()
+    };
+    let connector = TlsConnector::from(Arc::new(config));
+    let domain = server_host.try_into().expect("Invalid DNS name: {}");
     let tls_stream = connector
-        .connect(&server_host, stream)
+        .connect(domain, stream)
         .await
         .expect("Failed to connect TLS: {}");
     println!("TLS connected..");
